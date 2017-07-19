@@ -122,6 +122,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         my_doa_count = sum(1 for share in node.tracker.get_chain(node.best_share_var.value, lookbehind) if share.hash in wb.my_share_hashes and share.share_data['stale_info'] == 'doa')
         my_share_count = my_unstale_count + my_orphan_count + my_doa_count
         my_stale_count = my_orphan_count + my_doa_count
+        my_max_share = wb.my_max_share
         
         my_stale_prop = my_stale_count/my_share_count if my_share_count != 0 else None
         
@@ -151,7 +152,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 unstale_shares=my_unstale_count,
                 stale_shares=my_stale_count,
                 orphan_stale_shares=my_orphan_count,
-                doa_stale_shares=my_doa_count,
+                doa_stale_shares=my_doa_count
             ),
             my_stale_proportions_in_last_hour=dict(
                 stale=my_stale_prop,
@@ -171,6 +172,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 total=shares,
                 orphan=stale_orphan_shares,
                 dead=stale_doa_shares,
+                my_best=bitcoin_data.humanize_num(my_max_share)
             ),
             uptime=time.time() - start_time,
             attempts_to_share=bitcoin_data.target_to_average_attempts(node.tracker.items[node.best_share_var.value].max_target),
@@ -225,6 +227,13 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
     web_root.putChild('peer_versions', WebInterface(lambda: dict(('%s:%i' % peer.addr, peer.other_sub_version) for peer in node.p2p_node.peers.itervalues())))
     web_root.putChild('payout_addr', WebInterface(lambda: bitcoin_data.pubkey_hash_to_address(wb.my_pubkey_hash, node.net.PARENT)))
     web_root.putChild('payout_addrs', WebInterface(lambda: list(('%s' % bitcoin_data.pubkey_hash_to_address(add, node.net.PARENT)) for add in wb.pubkeys.keys)))
+    web_root.putChild('share_chain', WebInterface(lambda: [dict(
+        ts=s.timestamp,
+        hash='%064x' % s.header_hash,
+        share_diff=bitcoin_data.target_to_difficulty(s.header_hash),
+        target_diff=bitcoin_data.target_to_difficulty(s.target),
+        block_diff=bitcoin_data.target_to_difficulty(s.header['bits'].target),
+    ) for s in node.tracker.get_chain(node.best_share_var.value, min(node.tracker.get_height(node.best_share_var.value), 24*60*60//node.net.SHARE_PERIOD)) ]))
     web_root.putChild('recent_blocks', WebInterface(lambda: [dict(
         ts=s.timestamp,
         hash='%064x' % s.header_hash,

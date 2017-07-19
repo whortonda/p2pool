@@ -310,3 +310,22 @@ def script2_to_human(script2, net):
             return 'Address. Address: %s' % (pubkey_hash_to_address(pubkey_hash, net),)
     
     return 'Unknown. Script: %s'  % (script2.encode('hex'),)
+
+def humanize_num(n):
+    assert isinstance(n,(int,long,float))
+    
+    suffixes = ['','k','M','G','T','P','E','Z','Y']
+    t = 1000
+    i = 0
+    s = 0
+
+    while i < len(suffixes):
+        if n < t**(i+1):
+            s = n/(t**i)
+            if s < 10:
+                return "{:.2f}".format(s)+suffixes[i]
+            elif s < 100:
+                return "{:.1f}".format(s)+suffixes[i]
+            else:
+                return "{:.0f}".format(s)+suffixes[i]
+        i += 1

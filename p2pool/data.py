@@ -181,7 +181,7 @@ class NewShare(object):
         this_script = bitcoin_data.pubkey_hash_to_script2(share_data['pubkey_hash'])
         amounts[this_script] = amounts.get(this_script, 0) + share_data['subsidy']//200 # 0.5% goes to block finder
         amounts[DONATION_SCRIPT] = amounts.get(DONATION_SCRIPT, 0) + share_data['subsidy'] - sum(amounts.itervalues()) # all that's left over is the donation weight and some extra satoshis due to rounding
-        
+
         if sum(amounts.itervalues()) != share_data['subsidy'] or any(x < 0 for x in amounts.itervalues()):
             raise ValueError()
         
@@ -199,15 +199,16 @@ class NewShare(object):
             abswork=((previous_share.abswork if previous_share is not None else 0) + bitcoin_data.target_to_average_attempts(bits.target)) % 2**128,
         )
 
-        if desired_timestamp > previous_share.timestamp + 180:
-            print "Warning: Previous share's timestamp is %i seconds old." % int(desired_timestamp - previous_share.timestamp)
-            print "Make sure your system clock is accurate, and ensure that you're connected to decent peers."
-            print "If your clock is more than 300 seconds behind, it can result in orphaned shares."
-            print "(It's also possible that this share is just taking a long time to mine.)"
-        if previous_share.timestamp > int(time.mktime(time.gmtime()) - time.mktime(time.gmtime(0))) + 3:
-            print "WARNING! Previous share's timestamp is %i seconds in the future. This is not normal." % \
-                   int(previous_share.timestamp - (int(time.mktime(time.gmtime()) - time.mktime(time.gmtime(0)))))
-            print "Make sure your system clock is accurate. Errors beyond 300 sec result in orphaned shares."
+    	if False and previous_share is not None:
+    		if desired_timestamp > previous_share.timestamp + 180:
+    		    print "Warning: Previous share's timestamp is %i seconds old." % int(desired_timestamp - previous_share.timestamp)
+    		    print "Make sure your system clock is accurate, and ensure that you're connected to decent peers."
+    		    print "If your clock is more than 300 seconds behind, it can result in orphaned shares."
+    		    print "(It's also possible that this share is just taking a long time to mine.)"
+    		if previous_share.timestamp > int(time.mktime(time.gmtime()) - time.mktime(time.gmtime(0))) + 3:
+    		    print "WARNING! Previous share's timestamp is %i seconds in the future. This is not normal." % \
+    		           int(previous_share.timestamp - (int(time.mktime(time.gmtime()) - time.mktime(time.gmtime(0)))))
+    		    print "Make sure your system clock is accurate. Errors beyond 300 sec result in orphaned shares."
         
         gentx = dict(
             version=1,
@@ -222,6 +223,17 @@ class NewShare(object):
             )],
             lock_time=0,
         )
+
+        # gentx = dict(
+        #     version=1,
+        #     tx_ins=[dict(
+        #         previous_output=None,
+        #         sequence=None,
+        #         script=share_data['coinbase'],
+        #     )],
+        #     tx_outs=[dict(value=amounts[script], script=script) for script in dests if amounts[script]],
+        #     lock_time=0,
+        # )
         
         def get_share(header, last_txout_nonce=last_txout_nonce):
             min_header = dict(header); del min_header['merkle_root']

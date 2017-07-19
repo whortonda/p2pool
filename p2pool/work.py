@@ -6,8 +6,9 @@ import random
 import re
 import sys
 import time
+import urlparse
 
-from twisted.internet import defer
+from twisted.internet import defer, reactor
 from twisted.python import log
 
 import bitcoin.getwork as bitcoin_getwork, bitcoin.data as bitcoin_data
@@ -16,6 +17,7 @@ from util import forest, jsonrpc, variable, deferral, math, pack
 import p2pool, p2pool.data as p2pool_data
 
 print_throttle = 0.0
+print_throttle_seconds = 1
 
 class WorkerBridge(worker_interface.WorkerBridge):
     COINBASE_NONCE_LENGTH = 8
@@ -38,8 +40,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
         self.running = True
         self.pseudoshare_received = variable.Event()
         self.share_received = variable.Event()
-        self.local_rate_monitor = math.RateMonitor(10*60)
-        self.local_addr_rate_monitor = math.RateMonitor(10*60)
+        self.local_rate_monitor = math.RateMonitor(1*60)
+        self.local_addr_rate_monitor = math.RateMonitor(1*60)
         
         self.removed_unstales_var = variable.Variable((0, 0, 0))
         self.removed_doa_unstales_var = variable.Variable(0)
@@ -47,8 +49,13 @@ class WorkerBridge(worker_interface.WorkerBridge):
         self.last_work_shares = variable.Variable( {} )
         self.my_share_hashes = set()
         self.my_doa_share_hashes = set()
+        self.my_max_share = 0
 
         self.address_throttle = 0
+
+        self.merged_work_restart_throttle_seconds = 15
+        self.merged_work_restart_last_call_time = 0.0
+        self.merged_work_restart_scheduled_call = None
         
         self.tracker_view = forest.TrackerView(self.node.tracker, forest.get_attributedelta_type(dict(forest.AttributeDelta.attrs,
             my_count=lambda share: 1 if share.hash in self.my_share_hashes else 0,
@@ -83,6 +90,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     hash=int(auxblock['hash'], 16),
                     target='p2pool' if target == 'p2pool' else pack.IntType(256).unpack(target.decode('hex')),
                     merged_proxy=merged_proxy,
+                    name=urlparse.urlsplit(merged_url).fragment
                 )}))
                 yield deferral.sleep(1)
         for merged_url, merged_userpass in merged_urls:
@@ -128,8 +136,23 @@ class WorkerBridge(worker_interface.WorkerBridge):
             # trigger LP if version/previous_block/bits changed or transactions changed from nothing
             if any(before[x] != after[x] for x in ['version', 'previous_block', 'bits']) or (not before['transactions'] and after['transactions']):
                 self.new_work_event.happened()
-        self.merged_work.changed.watch(lambda _: self.new_work_event.happened())
+        # self.merged_work.changed.watch(lambda _: self.new_work_event.happened())
         self.node.best_share_var.changed.watch(lambda _: self.new_work_event.happened())
+
+        def merged_work_change_event_handler(e):
+            current_time = time.time()
+
+            if self.merged_work_restart_scheduled_call and self.merged_work_restart_scheduled_call.active():
+                self.merged_work_restart_scheduled_call.cancel()
+
+            delay = max(1,self.merged_work_restart_last_call_time-current_time+self.merged_work_restart_throttle_seconds)
+            self.merged_work_restart_scheduled_call = reactor.callLater(delay,merged_work_change_happened,None)
+
+        self.merged_work.changed.watch(merged_work_change_event_handler)
+
+        def merged_work_change_happened(e):
+            self.new_work_event.happened()
+            self.merged_work_restart_last_call_time = time.time()
     
     def stop(self):
         self.running = False
@@ -368,11 +391,11 @@ class WorkerBridge(worker_interface.WorkerBridge):
             print_throttle = time.time()
         else:
             current_time = time.time()
-            if (current_time - print_throttle) > 5.0:
-                print 'New work for %s! Diff: %.02f Share diff: %.02f Block value: %.2f %s (%i tx, %.0f kB)' % (
+            if (current_time - print_throttle) > print_throttle_seconds:
+                print 'New work for %s! Diff: %s Share diff: %s Block value: %.2f %s (%i tx, %.0f kB)' % (
                     bitcoin_data.pubkey_hash_to_address(pubkey_hash, self.node.net.PARENT),
-                    bitcoin_data.target_to_difficulty(target),
-                    bitcoin_data.target_to_difficulty(share_info['bits'].target),
+                    bitcoin_data.humanize_num(bitcoin_data.target_to_difficulty(target)),
+                    bitcoin_data.humanize_num(bitcoin_data.target_to_difficulty(share_info['bits'].target)),
                     self.current_work.value['subsidy']*1e-8, self.node.net.PARENT.SYMBOL,
                     len(self.current_work.value['transactions']),
                     sum(map(bitcoin_data.tx_type.packed_size, self.current_work.value['transactions']))/1000.,
@@ -406,9 +429,9 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 if pow_hash <= header['bits'].target or p2pool.DEBUG:
                     helper.submit_block(dict(header=header, txs=[new_gentx] + other_transactions), False, self.node.factory, self.node.bitcoind, self.node.bitcoind_work, self.node.net)
                     if pow_hash <= header['bits'].target:
-                        print
+                        print '**************************************************'
                         print 'GOT BLOCK FROM MINER! Passing to bitcoind! %s%064x' % (self.node.net.PARENT.BLOCK_EXPLORER_URL_PREFIX, header_hash)
-                        print
+                        print '**************************************************'
             except:
                 log.err(None, 'Error while processing potential block:')
             
@@ -422,7 +445,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
             for aux_work, index, hashes in mm_later:
                 try:
                     if pow_hash <= aux_work['target'] or p2pool.DEBUG:
-                        df = deferral.retry('Error submitting merged block: (will retry)', 10, 10)(aux_work['merged_proxy'].rpc_getauxblock)(
+                        df = deferral.retry('Error submitting %s merged block (will retry)' % (aux_work['name']), 10, 3)(aux_work['merged_proxy'].rpc_getauxblock)(
                             pack.IntType(256, 'big').pack(aux_work['hash']).encode('hex'),
                             bitcoin_data.aux_pow_type.pack(dict(
                                 merkle_tx=dict(
@@ -437,24 +460,32 @@ class WorkerBridge(worker_interface.WorkerBridge):
                         @df.addCallback
                         def _(result, aux_work=aux_work):
                             if result != (pow_hash <= aux_work['target']):
-                                print >>sys.stderr, 'Merged block submittal result: %s Expected: %s' % (result, pow_hash <= aux_work['target'])
+                                print '   *** REJECTED *** %s' % (aux_work['name'])
                             else:
-                                print 'Merged block submittal result: %s' % (result,)
+                                print '   *** ACCEPTED *** %s (%s/%s)' % (
+                                    aux_work['name'],
+                                    bitcoin_data.humanize_num(bitcoin_data.target_to_difficulty(aux_work['target'])),
+                                    bitcoin_data.humanize_num(bitcoin_data.target_to_difficulty(pow_hash))
+                                )
                         @df.addErrback
                         def _(err):
-                            log.err(err, 'Error submitting merged block:')
+                            log.err(err, '   Error submitting %s merged block:' % (aux_work['name']) )
                 except:
-                    log.err(None, 'Error while processing merged mining POW:')
+                    log.err(None, '   Error while processing %s merged mining POW:' % (aux_work['name']) )
             
             if pow_hash <= share_info['bits'].target and header_hash not in received_header_hashes:
                 last_txout_nonce = pack.IntType(8*self.COINBASE_NONCE_LENGTH).unpack(coinbase_nonce)
                 share = get_share(header, last_txout_nonce)
+                this_share_target_diff = bitcoin_data.target_to_difficulty(share_info['bits'].target)
+                this_share_diff = bitcoin_data.target_to_difficulty(pow_hash)
                 
-                print 'GOT SHARE! %s %s prev %s age %.2fs%s' % (
+                print '*** GOT SHARE! *** %s %s prev %s age %.2fs diff (%s/%s)%s' % (
                     user,
                     p2pool_data.format_hash(share.hash),
                     p2pool_data.format_hash(share.previous_hash),
                     time.time() - getwork_time,
+                    bitcoin_data.humanize_num(this_share_target_diff),
+                    bitcoin_data.humanize_num(this_share_diff),
                     ' DEAD ON ARRIVAL' if not on_time else '',
                 )
 
@@ -471,6 +502,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 self.my_share_hashes.add(share.hash)
                 if not on_time:
                     self.my_doa_share_hashes.add(share.hash)
+                if this_share_diff > self.my_max_share:
+                    self.my_max_share = this_share_diff
                 
                 self.node.tracker.add(share)
                 self.node.set_best_share()

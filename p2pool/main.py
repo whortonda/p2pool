@@ -378,17 +378,29 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                     datums, dt = wb.local_rate_monitor.get_datums_in_last()
                     my_att_s = sum(datum['work']/dt for datum in datums)
                     my_shares_per_s = sum(datum['work']/dt/bitcoin_data.target_to_average_attempts(datum['share_target']) for datum in datums)
-                    this_str += '\n Local: %sH/s in last %s Local dead on arrival: %s Expected time to share: %s' % (
+
+                    my_best_share = 0
+                    for s in node.tracker.get_chain(node.best_share_var.value, min(node.tracker.get_height(node.best_share_var.value), 2*net.CHAIN_LENGTH)):
+                        if(bitcoin_data.target_to_difficulty(s.header_hash) > my_best_share and s.hash in wb.my_share_hashes):
+                            my_best_share = bitcoin_data.target_to_difficulty(s.header_hash)
+
+                    this_str += '\n Local: %sH/s in last %s Local dead on arrival: %s Expected time to share: %s Best local share: %s' % (
                         math.format(int(my_att_s)),
                         math.format_dt(dt),
                         math.format_binomial_conf(sum(1 for datum in datums if datum['dead']), len(datums), 0.95),
                         math.format_dt(1/my_shares_per_s) if my_shares_per_s else '???',
+                        bitcoin_data.humanize_num(my_best_share)
                     )
                     
                     if height > 2:
                         (stale_orphan_shares, stale_doa_shares), shares, _ = wb.get_stale_counts()
                         stale_prop = p2pool_data.get_average_stale_prop(node.tracker, node.best_share_var.value, min(60*60//net.SHARE_PERIOD, height))
                         real_att_s = p2pool_data.get_pool_attempts_per_second(node.tracker, node.best_share_var.value, min(height - 1, 60*60//net.SHARE_PERIOD)) / (1 - stale_prop)
+
+                        chain_best_share = 0
+                        for s in node.tracker.get_chain(node.best_share_var.value, min(node.tracker.get_height(node.best_share_var.value), 2*net.CHAIN_LENGTH)):
+                            if(bitcoin_data.target_to_difficulty(s.header_hash) > chain_best_share):
+                                chain_best_share = bitcoin_data.target_to_difficulty(s.header_hash)
                         
                         paystr = ''
                         paytot = 0.0
@@ -397,11 +409,12 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                             paytot += curtot*1e-8
                             paystr += "(%.4f)" % (curtot*1e-8,)
                         paystr += "=%.4f" % (paytot,)
-                        this_str += '\n Shares: %i (%i orphan, %i dead) Stale rate: %s Efficiency: %s Current payout: %s %s' % (
+                        this_str += '\n Shares: %i (%i orphan, %i dead) Stale rate: %s Efficiency: %s Current payout: %s %s Best chain share: %s' % (
                             shares, stale_orphan_shares, stale_doa_shares,
                             math.format_binomial_conf(stale_orphan_shares + stale_doa_shares, shares, 0.95),
                             math.format_binomial_conf(stale_orphan_shares + stale_doa_shares, shares, 0.95, lambda x: (1 - x)/(1 - stale_prop)),
                             paystr, net.PARENT.SYMBOL,
+                            bitcoin_data.humanize_num(chain_best_share)
                         )
                         this_str += '\n Pool: %sH/s Stale rate: %.1f%% Expected time to block: %s' % (
                             math.format(int(real_att_s)),
